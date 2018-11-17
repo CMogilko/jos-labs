@@ -1,8 +1,14 @@
 OBJDIRS += lib
 
-LIB_SRCFILES :=		lib/printfmt.c \
+LIB_SRCFILES :=		lib/console.c \
+			lib/libmain.c \
+			lib/exit.c \
+			lib/panic.c \
+			lib/printf.c \
+			lib/printfmt.c \
 			lib/readline.c \
-			lib/string.c
+			lib/string.c \
+			lib/syscall.c
 
 
 LIB_OBJFILES := $(patsubst lib/%.c, $(OBJDIR)/lib/%.o, $(LIB_SRCFILES))

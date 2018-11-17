@@ -8,6 +8,7 @@
 
 #include <kern/pmap.h>
 #include <kern/kclock.h>
+#include <kern/env.h>
 
 // These variables are set by i386_detect_memory()
 static physaddr_t maxpa;	// Maximum physical address
@@ -174,7 +175,10 @@ i386_vm_init(void)
 	// programs will get read-only access to the array as well.
 	// You must allocate the array yourself.
 	// Your code goes here: 
-	
+
+	//////////////////////////////////////////////////////////////////////
+	// Make 'envs' point to an array of size 'NENV' of 'struct Env'.
+	// LAB 3: Your code here.
 
 	//////////////////////////////////////////////////////////////////////
 	// Now that we've allocated the initial kernel data structures, we set
@@ -183,7 +187,7 @@ i386_vm_init(void)
 	// particular, we can now map memory using boot_map_segment or page_insert
 	page_init();
 
-    check_page_alloc();
+	check_page_alloc();
 
 	page_check();
 
@@ -198,10 +202,17 @@ i386_vm_init(void)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
 	
-
 	//////////////////////////////////////////////////////////////////////
-        // Use the physical memory that bootstack refers to as
-        // the kernel stack.  The complete VA
+	// Map the 'envs' array read-only by the user at linear address UENVS
+	// (ie. perm = PTE_U | PTE_P).
+	// Permissions:
+	//    - the new image at UENVS  -- kernel R, user R
+	//    - envs itself -- kernel RW, user NONE
+	// LAB 3: Your code here.
+	
+	//////////////////////////////////////////////////////////////////////
+	// Use the physical memory that bootstack refers to as
+	// the kernel stack.  The complete VA
 	// range of the stack, [KSTACKTOP-PTSIZE, KSTACKTOP), breaks into two
 	// pieces:
 	//     * [KSTACKTOP-KSTKSIZE, KSTACKTOP) -- backed by physical memory
@@ -209,7 +220,6 @@ i386_vm_init(void)
 	//     Permissions: kernel RW, user NONE
 	// Your code goes here:
 	
-
 	//////////////////////////////////////////////////////////////////////
 	// Map all of physical memory at KERNBASE. 
 	// Ie.  the VA range [KERNBASE, 2^32) should map to
@@ -219,7 +229,6 @@ i386_vm_init(void)
 	// Permissions: kernel RW, user NONE
 	// Your code goes here: 
 	
-
 	// Check that the initial page directory has been set up correctly.
 	check_boot_pgdir();
 
@@ -283,9 +292,9 @@ check_page_alloc()
 	struct Page *pp, *pp0, *pp1, *pp2;
 	struct Page_list fl;
 	
-        // if there's a page that shouldn't be on
-        // the free list, try to make sure it
-        // eventually causes trouble.
+	// if there's a page that shouldn't be on
+	// the free list, try to make sure it
+	// eventually causes trouble.
 	LIST_FOREACH(pp0, &page_free_list, pp_link)
 		memset(page2kva(pp0), 0x97, 128);
 
@@ -298,9 +307,9 @@ check_page_alloc()
 	assert(pp0);
 	assert(pp1 && pp1 != pp0);
 	assert(pp2 && pp2 != pp1 && pp2 != pp0);
-        assert(page2pa(pp0) < npage*PGSIZE);
-        assert(page2pa(pp1) < npage*PGSIZE);
-        assert(page2pa(pp2) < npage*PGSIZE);
+	assert(page2pa(pp0) < npage*PGSIZE);
+	assert(page2pa(pp1) < npage*PGSIZE);
+	assert(page2pa(pp2) < npage*PGSIZE);
 
 	// temporarily steal the rest of the free pages
 	fl = page_free_list;
@@ -309,10 +318,10 @@ check_page_alloc()
 	// should be no free memory
 	assert(page_alloc(&pp) == -E_NO_MEM);
 
-        // free and re-allocate?
-        page_free(pp0);
-        page_free(pp1);
-        page_free(pp2);
+	// free and re-allocate?
+	page_free(pp0);
+	page_free(pp1);
+	page_free(pp2);
 	pp0 = pp1 = pp2 = 0;
 	assert(page_alloc(&pp0) == 0);
 	assert(page_alloc(&pp1) == 0);
@@ -357,6 +366,9 @@ check_boot_pgdir(void)
 		assert(check_va2pa(pgdir, UPAGES + i) == PADDR(pages) + i);
 	
 	// check envs array (new test for lab 3)
+	n = ROUNDUP(NENV*sizeof(struct Env), PGSIZE);
+	for (i = 0; i < n; i += PGSIZE)
+		assert(check_va2pa(pgdir, UENVS + i) == PADDR(envs) + i);
 
 	// check phys mem
 	for (i = 0; i < npage * PGSIZE; i += PGSIZE)
@@ -373,6 +385,7 @@ check_boot_pgdir(void)
 		case PDX(UVPT):
 		case PDX(KSTACKTOP-1):
 		case PDX(UPAGES):
+		case PDX(UENVS):
 			assert(pgdir[i]);
 			break;
 		default:
@@ -433,6 +446,7 @@ page_init(void)
 	//     Which pages are used for page tables and other data structures?
 	//
 	// Change the code to reflect this.
+	
 	size_t i;
 	LIST_INIT(&page_free_list);
 	for (i = 0; i < npage; i++) {
@@ -611,11 +625,54 @@ void
 tlb_invalidate(pde_t *pgdir, void *va)
 {
 	// Flush the entry only if we're modifying the current address space.
-	// For now, there is only one address space, so always invalidate.
-	invlpg(va);
+	if (!curenv || curenv->env_pgdir == pgdir)
+		invlpg(va);
 }
 
 static uintptr_t user_mem_check_addr;
+
+//
+// Check that an environment is allowed to access the range of memory
+// [va, va+len) with permissions 'perm | PTE_P'.
+// Normally 'perm' will contain PTE_U at least, but this is not required.
+// 'va' and 'len' need not be page-aligned; you must test every page that
+// contains any of that range.  You will test either 'len/PGSIZE',
+// 'len/PGSIZE + 1', or 'len/PGSIZE + 2' pages.
+//
+// A user program can access a virtual address if (1) the address is below
+// ULIM, and (2) the page table gives it permission.  These are exactly
+// the tests you should implement here.
+//
+// If there is an error, set the 'user_mem_check_addr' variable to the first
+// erroneous virtual address.
+//
+// Returns 0 if the user program can access this range of addresses,
+// and -E_FAULT otherwise.
+//
+int
+user_mem_check(struct Env *env, const void *va, size_t len, int perm)
+{
+	// LAB 3: Your code here. 
+
+	return 0;
+}
+
+//
+// Checks that environment 'env' is allowed to access the range
+// of memory [va, va+len) with permissions 'perm | PTE_U'.
+// If it can, then the function simply returns.
+// If it cannot, 'env' is destroyed and, if env is the current
+// environment, this function will not return.
+//
+void
+user_mem_assert(struct Env *env, const void *va, size_t len, int perm)
+{
+	if (user_mem_check(env, va, len, perm | PTE_U) < 0) {
+		cprintf("[%08x] user_mem_check assertion failure for "
+			"va %08x\n", env->env_id, user_mem_check_addr);
+		env_destroy(env);	// may not return
+	}
+}
 
 // check page_insert, page_remove, &c
 static void
